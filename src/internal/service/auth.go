@@ -42,6 +42,7 @@ type AuthService interface {
 	HandleGoogleCallback(ctx context.Context, code string) (*domain.TokenPair, error)
 	RefreshTokens(ctx context.Context, refreshToken string) (*domain.TokenPair, error)
 	ValidateAccessToken(tokenString string) (uuid.UUID, error)
+	GetMe(ctx context.Context, userID uuid.UUID) (*domain.User, error)
 }
 
 type authService struct {
@@ -153,6 +154,17 @@ func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error)
 	}
 
 	return userID, nil
+}
+
+func (s *authService) GetMe(ctx context.Context, userID uuid.UUID) (*domain.User, error) {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, ErrInvalidToken
+	}
+	return user, nil
 }
 
 func (s *authService) generateTokenPair(ctx context.Context, userID uuid.UUID) (*domain.TokenPair, error) {

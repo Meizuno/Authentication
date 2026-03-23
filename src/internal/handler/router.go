@@ -20,6 +20,7 @@ func NewRouter(authHandler *AuthHandler) *gin.Engine {
 		auth.GET("/google/callback", authHandler.GoogleCallback)
 		auth.POST("/refresh", authHandler.Refresh)
 		auth.GET("/validate", authHandler.Validate)
+		auth.GET("/me", authHandler.Me)
 	}
 
 	return r

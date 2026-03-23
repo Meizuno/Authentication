@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"gorm.io/gorm"
 )
@@ -19,6 +20,15 @@ func NewUserRepository(db *gorm.DB) domain.UserRepository {
 func (r *userRepository) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
 	var user domain.User
 	err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &user, err
+}
+
+func (r *userRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
+	var user domain.User
+	err := r.db.WithContext(ctx).First(&user, "id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
