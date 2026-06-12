@@ -199,6 +199,12 @@ func (h *AuthHandler) Me(c *gin.Context) {
 
 	user, err := h.authService.GetMe(c.Request.Context(), userID)
 	if err != nil {
+		// A valid token whose user no longer exists is an auth failure, not a
+		// server error.
+		if errors.Is(err, service.ErrInvalidToken) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user"})
 		return
 	}

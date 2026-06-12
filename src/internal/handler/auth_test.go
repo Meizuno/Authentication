@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
+	"github.com/myronovy/authentication/src/internal/service"
 )
 
 // mockAuthService is a configurable stand-in for service.AuthService.
@@ -19,6 +20,8 @@ type mockAuthService struct {
 	callbackErr     error
 	loggedOutToken  string
 	loggedOutUserID uuid.UUID
+	getMeUser       *domain.User
+	getMeErr        error
 }
 
 func (m *mockAuthService) GetGoogleAuthURL(state string) string {
@@ -36,7 +39,7 @@ func (m *mockAuthService) RefreshTokens(_ context.Context, _ string) (*domain.To
 func (m *mockAuthService) ValidateAccessToken(_ string) (uuid.UUID, error) { return uuid.Nil, nil }
 
 func (m *mockAuthService) GetMe(_ context.Context, _ uuid.UUID) (*domain.User, error) {
-	return nil, nil
+	return m.getMeUser, m.getMeErr
 }
 
 func (m *mockAuthService) Logout(_ context.Context, refreshToken string) error {
@@ -192,6 +195,20 @@ func TestCookiesAreSecureAndSameSite(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("oauth_state cookie was not set")
+	}
+}
+
+func TestMeReturns401WhenUserNoLongerExists(t *testing.T) {
+	h := newTestHandler(&mockAuthService{getMeErr: service.ErrInvalidToken}, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/me", nil)
+
+	h.Me(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("missing user: got status %d, want 401", w.Code)
 	}
 }
 

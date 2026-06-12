@@ -23,7 +23,12 @@ import (
 )
 
 func main() {
-	gin.SetMode(gin.ReleaseMode)
+	// Honor GIN_MODE if set; default to release for production safety.
+	if mode := os.Getenv("GIN_MODE"); mode != "" {
+		gin.SetMode(mode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	cfg := config.Load()
 
