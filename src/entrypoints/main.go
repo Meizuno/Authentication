@@ -56,7 +56,7 @@ func main() {
 	tokenRepo := repository.NewTokenRepository(db)
 	authSvc := service.NewAuthService(cfg, userRepo, tokenRepo)
 	authHandler := handler.NewAuthHandler(authSvc, cfg)
-	router := handler.NewRouter(authHandler)
+	router := handler.NewRouter(authHandler, authSvc)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

@@ -4,9 +4,10 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/myronovy/authentication/src/internal/service"
 )
 
-func NewRouter(authHandler *AuthHandler) *gin.Engine {
+func NewRouter(authHandler *AuthHandler, authService service.AuthService) *gin.Engine {
 	r := gin.Default()
 	r.SetTrustedProxies(nil)
 
@@ -18,9 +19,15 @@ func NewRouter(authHandler *AuthHandler) *gin.Engine {
 	r.GET("/google/callback", authHandler.GoogleCallback)
 	r.POST("/refresh", authHandler.Refresh)
 	r.POST("/logout", authHandler.Logout)
-	r.POST("/logout-all", authHandler.LogoutAll)
-	r.GET("/validate", authHandler.Validate)
-	r.GET("/me", authHandler.Me)
+
+	// Routes that require a valid access token.
+	protected := r.Group("/")
+	protected.Use(AuthMiddleware(authService))
+	{
+		protected.POST("/logout-all", authHandler.LogoutAll)
+		protected.GET("/validate", authHandler.Validate)
+		protected.GET("/me", authHandler.Me)
+	}
 
 	return r
 }

@@ -176,18 +176,10 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "logged out"})
 }
 
-// LogoutAll revokes every refresh token for the authenticated user.
+// LogoutAll revokes every refresh token for the authenticated user. The user id
+// is supplied by AuthMiddleware.
 func (h *AuthHandler) LogoutAll(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if len(token) < 8 || token[:7] != "Bearer " {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid authorization header"})
-		return
-	}
-	userID, err := h.authService.ValidateAccessToken(token[7:])
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-		return
-	}
+	userID, _ := userIDFromContext(c)
 	if err := h.authService.LogoutAll(c.Request.Context(), userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to logout"})
 		return
@@ -198,41 +190,12 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 }
 
 func (h *AuthHandler) Validate(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if len(token) < 8 || token[:7] != "Bearer " {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid authorization header"})
-		return
-	}
-
-	userID, err := h.authService.ValidateAccessToken(token[7:])
-	if err != nil {
-		if errors.Is(err, service.ErrTokenExpired) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
-			return
-		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-		return
-	}
-
+	userID, _ := userIDFromContext(c)
 	c.JSON(http.StatusOK, gin.H{"user_id": userID})
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if len(token) < 8 || token[:7] != "Bearer " {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid authorization header"})
-		return
-	}
-
-	userID, err := h.authService.ValidateAccessToken(token[7:])
-	if err != nil {
-		if errors.Is(err, service.ErrTokenExpired) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
-			return
-		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-		return
-	}
+	userID, _ := userIDFromContext(c)
 
 	user, err := h.authService.GetMe(c.Request.Context(), userID)
 	if err != nil {
