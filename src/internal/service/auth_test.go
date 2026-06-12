@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
@@ -104,6 +106,39 @@ func TestRefreshTokenStoredAsHashNotPlaintext(t *testing.T) {
 	}
 	if stored.TokenHash != wantHash {
 		t.Fatalf("stored hash = %q, want %q", stored.TokenHash, wantHash)
+	}
+}
+
+func TestValidateAccessTokenRejectsTokenWithoutExp(t *testing.T) {
+	svc := newTestService(newFakeTokenRepo(), newFakeUserRepo())
+
+	// A correctly-signed token that simply omits exp must be rejected.
+	claims := jwt.MapClaims{"sub": uuid.New().String(), "iat": time.Now().Unix()}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(svc.cfg.JWTSecret))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	if _, err := svc.ValidateAccessToken(signed); err == nil {
+		t.Fatal("expected token without exp to be rejected")
+	}
+}
+
+func TestValidateAccessTokenAcceptsTokenWithExp(t *testing.T) {
+	svc := newTestService(newFakeTokenRepo(), newFakeUserRepo())
+	userID := uuid.New()
+
+	signed, err := svc.generateAccessToken(userID)
+	if err != nil {
+		t.Fatalf("generateAccessToken: %v", err)
+	}
+
+	got, err := svc.ValidateAccessToken(signed)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != userID {
+		t.Fatalf("user id = %s, want %s", got, userID)
 	}
 }
 

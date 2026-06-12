@@ -1,12 +1,17 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
+
+// minJWTSecretLen is the floor for an HS256 signing secret. Anything shorter is
+// brute-forceable and refused at boot.
+const minJWTSecretLen = 32
 
 type Config struct {
 	Port                string
@@ -24,7 +29,7 @@ func Load() *Config {
 		log.Println("No .env file found, reading from environment")
 	}
 
-	return &Config{
+	cfg := &Config{
 		Port:                getEnv("PORT", "8080"),
 		DatabaseURL:         mustGetEnv("DATABASE_URL"),
 		JWTSecret:           mustGetEnv("JWT_SECRET"),
@@ -34,6 +39,20 @@ func Load() *Config {
 		AllowedEmails:       parseList(getEnv("ALLOWED_EMAILS", "")),
 		AllowedRedirectURLs: parseList(getEnv("ALLOWED_REDIRECT_URLS", "")),
 	}
+
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
+
+	return cfg
+}
+
+// Validate enforces invariants that must hold for the service to be safe to run.
+func (c *Config) Validate() error {
+	if len(c.JWTSecret) < minJWTSecretLen {
+		return fmt.Errorf("JWT_SECRET must be at least %d bytes, got %d", minJWTSecretLen, len(c.JWTSecret))
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {

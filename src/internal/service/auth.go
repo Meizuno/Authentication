@@ -148,7 +148,7 @@ func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error)
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return []byte(s.cfg.JWTSecret), nil
-	})
+	}, jwt.WithExpirationRequired())
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return uuid.Nil, ErrTokenExpired
