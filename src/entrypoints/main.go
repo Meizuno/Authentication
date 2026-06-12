@@ -49,7 +49,7 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	tokenRepo := repository.NewTokenRepository(db)
 	authSvc := service.NewAuthService(cfg, userRepo, tokenRepo)
-	authHandler := handler.NewAuthHandler(authSvc)
+	authHandler := handler.NewAuthHandler(authSvc, cfg)
 	router := handler.NewRouter(authHandler)
 
 	log.Printf("Server starting on :%s", cfg.Port)

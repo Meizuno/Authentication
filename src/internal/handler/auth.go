@@ -2,20 +2,40 @@ package handler
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/service"
+)
+
+const (
+	oauthStateCookie  = "oauth_state"
+	redirectURLCookie = "auth_redirect_url"
+	oauthCookieMaxAge = 300 // seconds; the OAuth round-trip is short-lived
 )
 
 type AuthHandler struct {
 	authService service.AuthService
+	cfg         *config.Config
 }
 
-func NewAuthHandler(authService service.AuthService) *AuthHandler {
-	return &AuthHandler{authService: authService}
+func NewAuthHandler(authService service.AuthService, cfg *config.Config) *AuthHandler {
+	return &AuthHandler{authService: authService, cfg: cfg}
+}
+
+// setCookie writes a hardened cookie. Secure is hardcoded here; item 6 makes it
+// configurable so non-HTTPS local dev can still receive cookies.
+func (h *AuthHandler) setCookie(c *gin.Context, name, value string, maxAge int, httpOnly bool) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(name, value, maxAge, "/", "", true, httpOnly)
+}
+
+func (h *AuthHandler) clearCookie(c *gin.Context, name string) {
+	h.setCookie(c, name, "", -1, true)
 }
 
 func (h *AuthHandler) GoogleLogin(c *gin.Context) {
@@ -25,8 +45,12 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 		return
 	}
 
+	// Bind the state to the browser so the callback can prove this request
+	// originated from us (CSRF defense).
+	h.setCookie(c, oauthStateCookie, state, oauthCookieMaxAge, true)
+
 	if redirectURL := c.Query("redirect_url"); redirectURL != "" {
-		c.SetCookie("auth_redirect_url", redirectURL, 300, "/", "", false, true)
+		h.setCookie(c, redirectURLCookie, redirectURL, oauthCookieMaxAge, true)
 	}
 
 	url := h.authService.GetGoogleAuthURL(state)
@@ -34,6 +58,11 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 }
 
 func (h *AuthHandler) GoogleCallback(c *gin.Context) {
+	if !h.verifyState(c) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid oauth state"})
+		return
+	}
+
 	code := c.Query("code")
 	if code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing code"})
@@ -137,6 +166,20 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		"name":       user.Name,
 		"avatar_url": user.AvatarURL,
 	})
+}
+
+// verifyState confirms the state query param matches the value stored in the
+// httpOnly cookie set at /google. The cookie is always cleared afterwards so a
+// state cannot be replayed. Returns false on any absence or mismatch.
+func (h *AuthHandler) verifyState(c *gin.Context) bool {
+	state := c.Query("state")
+	cookie, err := c.Cookie(oauthStateCookie)
+	h.clearCookie(c, oauthStateCookie)
+
+	if state == "" || err != nil || cookie == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(state), []byte(cookie)) == 1
 }
 
 func generateState() (string, error) {
