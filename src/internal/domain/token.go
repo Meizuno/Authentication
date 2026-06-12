@@ -23,7 +23,10 @@ type TokenPair struct {
 
 type TokenRepository interface {
 	Create(ctx context.Context, token *RefreshToken) error
-	FindByTokenHash(ctx context.Context, tokenHash string) (*RefreshToken, error)
+	// ConsumeByTokenHash atomically deletes the row for tokenHash and returns
+	// it. It returns (nil, nil) when no row matched, so concurrent refreshes of
+	// the same token cannot both observe a live token.
+	ConsumeByTokenHash(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	DeleteByTokenHash(ctx context.Context, tokenHash string) error
 	DeleteByUserID(ctx context.Context, userID uuid.UUID) error
 }

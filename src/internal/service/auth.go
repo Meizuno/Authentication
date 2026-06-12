@@ -127,18 +127,14 @@ func (s *authService) HandleGoogleCallback(ctx context.Context, code string) (*d
 }
 
 func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*domain.TokenPair, error) {
-	tokenHash := hashToken(refreshToken)
-
-	stored, err := s.tokenRepo.FindByTokenHash(ctx, tokenHash)
+	// Atomically claim the token: find+delete in one step so two concurrent
+	// refreshes with the same token cannot both proceed.
+	stored, err := s.tokenRepo.ConsumeByTokenHash(ctx, hashToken(refreshToken))
 	if err != nil {
 		return nil, err
 	}
 	if stored == nil || time.Now().After(stored.ExpiresAt) {
 		return nil, ErrInvalidToken
-	}
-
-	if err := s.tokenRepo.DeleteByTokenHash(ctx, tokenHash); err != nil {
-		return nil, err
 	}
 
 	return s.generateTokenPair(ctx, stored.UserID)

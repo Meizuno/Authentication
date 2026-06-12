@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 // fakeTokenRepo is an in-memory TokenRepository keyed by token hash. It lets the
 // service tests observe exactly what gets persisted.
 type fakeTokenRepo struct {
+	mu     sync.Mutex
 	byHash map[string]*domain.RefreshToken
 }
 
@@ -24,20 +27,35 @@ func newFakeTokenRepo() *fakeTokenRepo {
 }
 
 func (r *fakeTokenRepo) Create(_ context.Context, t *domain.RefreshToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.byHash[t.TokenHash] = t
 	return nil
 }
 
-func (r *fakeTokenRepo) FindByTokenHash(_ context.Context, hash string) (*domain.RefreshToken, error) {
-	return r.byHash[hash], nil
+// ConsumeByTokenHash mirrors the production atomic delete: the map mutation is
+// guarded so exactly one concurrent caller can claim a given hash.
+func (r *fakeTokenRepo) ConsumeByTokenHash(_ context.Context, hash string) (*domain.RefreshToken, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.byHash[hash]
+	if !ok {
+		return nil, nil
+	}
+	delete(r.byHash, hash)
+	return t, nil
 }
 
 func (r *fakeTokenRepo) DeleteByTokenHash(_ context.Context, hash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.byHash, hash)
 	return nil
 }
 
 func (r *fakeTokenRepo) DeleteByUserID(_ context.Context, userID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for h, t := range r.byHash {
 		if t.UserID == userID {
 			delete(r.byHash, h)
@@ -211,5 +229,33 @@ func TestRefreshLookupByRawTokenSucceeds(t *testing.T) {
 	}
 	if _, ok := tokenRepo.byHash[hashToken(pair.RefreshToken)]; ok {
 		t.Fatal("old token hash still present after rotation")
+	}
+}
+
+func TestConcurrentRefreshAllowsOnlyOneWinner(t *testing.T) {
+	tokenRepo := newFakeTokenRepo()
+	svc := newTestService(tokenRepo, newFakeUserRepo())
+
+	pair, err := svc.generateTokenPair(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("generateTokenPair: %v", err)
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	var successes int32
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := svc.RefreshTokens(context.Background(), pair.RefreshToken); err == nil {
+				atomic.AddInt32(&successes, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 refresh to win the race, got %d", successes)
 	}
 }
