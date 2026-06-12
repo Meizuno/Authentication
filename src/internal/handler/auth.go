@@ -2,20 +2,66 @@ package handler
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/myronovy/authentication/src/internal/config"
+	"github.com/myronovy/authentication/src/internal/domain"
 	"github.com/myronovy/authentication/src/internal/service"
+)
+
+const (
+	oauthStateCookie  = "oauth_state"
+	redirectURLCookie = "auth_redirect_url"
+	oauthCookieMaxAge = 300 // seconds; the OAuth round-trip is short-lived
+
+	accessTokenCookie   = "access_token"
+	refreshTokenCookie  = "refresh_token"
+	accessCookieMaxAge  = 15 * 60          // mirrors the access-token TTL
+	refreshCookieMaxAge = 7 * 24 * 60 * 60 // mirrors the refresh-token TTL
 )
 
 type AuthHandler struct {
 	authService service.AuthService
+	cfg         *config.Config
 }
 
-func NewAuthHandler(authService service.AuthService) *AuthHandler {
-	return &AuthHandler{authService: authService}
+func NewAuthHandler(authService service.AuthService, cfg *config.Config) *AuthHandler {
+	return &AuthHandler{authService: authService, cfg: cfg}
+}
+
+// setCookie writes a hardened cookie: explicit SameSite=Lax and Secure driven by
+// config (default true; COOKIE_SECURE=false only for non-HTTPS local dev).
+func (h *AuthHandler) setCookie(c *gin.Context, name, value string, maxAge int, httpOnly bool) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(name, value, maxAge, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, httpOnly)
+}
+
+func (h *AuthHandler) clearCookie(c *gin.Context, name string) {
+	h.setCookie(c, name, "", -1, true)
+}
+
+// setTokenCookies delivers the token pair to the browser. The refresh token is
+// httpOnly so client JS can never read it; the short-lived access token is
+// readable so SPAs can attach it as a Bearer header.
+func (h *AuthHandler) setTokenCookies(c *gin.Context, pair *domain.TokenPair) {
+	h.setCookie(c, refreshTokenCookie, pair.RefreshToken, refreshCookieMaxAge, true)
+	h.setCookie(c, accessTokenCookie, pair.AccessToken, accessCookieMaxAge, false)
+}
+
+// isAllowedRedirect reports whether url exactly matches a configured target.
+// Exact matching closes the open-redirect: an attacker cannot point the flow at
+// their own domain to harvest tokens.
+func (h *AuthHandler) isAllowedRedirect(url string) bool {
+	for _, allowed := range h.cfg.AllowedRedirectURLs {
+		if url == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *AuthHandler) GoogleLogin(c *gin.Context) {
@@ -25,8 +71,12 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 		return
 	}
 
+	// Bind the state to the browser so the callback can prove this request
+	// originated from us (CSRF defense).
+	h.setCookie(c, oauthStateCookie, state, oauthCookieMaxAge, true)
+
 	if redirectURL := c.Query("redirect_url"); redirectURL != "" {
-		c.SetCookie("auth_redirect_url", redirectURL, 300, "/", "", false, true)
+		h.setCookie(c, redirectURLCookie, redirectURL, oauthCookieMaxAge, true)
 	}
 
 	url := h.authService.GetGoogleAuthURL(state)
@@ -34,6 +84,11 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 }
 
 func (h *AuthHandler) GoogleCallback(c *gin.Context) {
+	if !h.verifyState(c) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid oauth state"})
+		return
+	}
+
 	code := c.Query("code")
 	if code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing code"})
@@ -50,29 +105,34 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 		return
 	}
 
-	if redirectURL, err := c.Cookie("auth_redirect_url"); err == nil && redirectURL != "" {
-		c.SetCookie("auth_redirect_url", "", -1, "/", "", false, true)
-		c.Redirect(http.StatusTemporaryRedirect,
-			redirectURL+"?access_token="+pair.AccessToken+"&refresh_token="+pair.RefreshToken)
+	// Tokens are delivered via cookies only — never appended to a URL where
+	// they would leak through browser history, Referer, and proxy logs.
+	h.setTokenCookies(c, pair)
+
+	if redirectURL, err := c.Cookie(redirectURLCookie); err == nil && redirectURL != "" {
+		h.clearCookie(c, redirectURLCookie)
+		if !h.isAllowedRedirect(redirectURL) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_url not allowed"})
+			return
+		}
+		// No tokens in the query string; the browser already holds the cookies.
+		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"access_token":  pair.AccessToken,
-		"refresh_token": pair.RefreshToken,
+		"access_token": pair.AccessToken,
 	})
 }
 
 func (h *AuthHandler) Refresh(c *gin.Context) {
-	var body struct {
-		RefreshToken string `json:"refresh_token" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	refreshToken := h.readRefreshToken(c)
+	if refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing refresh token"})
 		return
 	}
 
-	pair, err := h.authService.RefreshTokens(c.Request.Context(), body.RefreshToken)
+	pair, err := h.authService.RefreshTokens(c.Request.Context(), refreshToken)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidToken) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
@@ -82,51 +142,69 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
+	// Rotated refresh token rides back in the httpOnly cookie; only the access
+	// token is exposed in the body.
+	h.setTokenCookies(c, pair)
 	c.JSON(http.StatusOK, gin.H{
-		"access_token":  pair.AccessToken,
-		"refresh_token": pair.RefreshToken,
+		"access_token": pair.AccessToken,
 	})
 }
 
-func (h *AuthHandler) Validate(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if len(token) < 8 || token[:7] != "Bearer " {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid authorization header"})
-		return
+// readRefreshToken prefers the httpOnly cookie and falls back to a JSON body for
+// non-browser clients.
+func (h *AuthHandler) readRefreshToken(c *gin.Context) string {
+	if cookie, err := c.Cookie(refreshTokenCookie); err == nil && cookie != "" {
+		return cookie
 	}
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	return body.RefreshToken
+}
 
-	userID, err := h.authService.ValidateAccessToken(token[7:])
-	if err != nil {
-		if errors.Is(err, service.ErrTokenExpired) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
+// Logout revokes the presented refresh token and clears the auth cookies.
+func (h *AuthHandler) Logout(c *gin.Context) {
+	if refreshToken := h.readRefreshToken(c); refreshToken != "" {
+		if err := h.authService.Logout(c.Request.Context(), refreshToken); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to logout"})
 			return
 		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+	}
+	h.clearCookie(c, refreshTokenCookie)
+	h.clearCookie(c, accessTokenCookie)
+	c.JSON(http.StatusOK, gin.H{"status": "logged out"})
+}
+
+// LogoutAll revokes every refresh token for the authenticated user. The user id
+// is supplied by AuthMiddleware.
+func (h *AuthHandler) LogoutAll(c *gin.Context) {
+	userID, _ := userIDFromContext(c)
+	if err := h.authService.LogoutAll(c.Request.Context(), userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to logout"})
 		return
 	}
+	h.clearCookie(c, refreshTokenCookie)
+	h.clearCookie(c, accessTokenCookie)
+	c.JSON(http.StatusOK, gin.H{"status": "logged out everywhere"})
+}
 
+func (h *AuthHandler) Validate(c *gin.Context) {
+	userID, _ := userIDFromContext(c)
 	c.JSON(http.StatusOK, gin.H{"user_id": userID})
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {
-	token := c.GetHeader("Authorization")
-	if len(token) < 8 || token[:7] != "Bearer " {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid authorization header"})
-		return
-	}
-
-	userID, err := h.authService.ValidateAccessToken(token[7:])
-	if err != nil {
-		if errors.Is(err, service.ErrTokenExpired) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
-			return
-		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-		return
-	}
+	userID, _ := userIDFromContext(c)
 
 	user, err := h.authService.GetMe(c.Request.Context(), userID)
 	if err != nil {
+		// A valid token whose user no longer exists is an auth failure, not a
+		// server error.
+		if errors.Is(err, service.ErrInvalidToken) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "user not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user"})
 		return
 	}
@@ -137,6 +215,20 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		"name":       user.Name,
 		"avatar_url": user.AvatarURL,
 	})
+}
+
+// verifyState confirms the state query param matches the value stored in the
+// httpOnly cookie set at /google. The cookie is always cleared afterwards so a
+// state cannot be replayed. Returns false on any absence or mismatch.
+func (h *AuthHandler) verifyState(c *gin.Context) bool {
+	state := c.Query("state")
+	cookie, err := c.Cookie(oauthStateCookie)
+	h.clearCookie(c, oauthStateCookie)
+
+	if state == "" || err != nil || cookie == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(state), []byte(cookie)) == 1
 }
 
 func generateState() (string, error) {

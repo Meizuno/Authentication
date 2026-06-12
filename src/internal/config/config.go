@@ -1,21 +1,30 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
 )
 
+// minJWTSecretLen is the floor for an HS256 signing secret. Anything shorter is
+// brute-forceable and refused at boot.
+const minJWTSecretLen = 32
+
 type Config struct {
-	Port            string
-	DatabaseURL     string
-	JWTSecret       string
-	GoogleClientID  string
-	GoogleSecret    string
-	GoogleCallbackURL string
-	AllowedEmails   []string
+	Port                string
+	DatabaseURL         string
+	JWTSecret           string
+	GoogleClientID      string
+	GoogleSecret        string
+	GoogleCallbackURL   string
+	AllowedEmails       []string
+	AllowedRedirectURLs []string
+	CookieSecure        bool
+	CookieDomain        string
 }
 
 func Load() *Config {
@@ -23,15 +32,32 @@ func Load() *Config {
 		log.Println("No .env file found, reading from environment")
 	}
 
-	return &Config{
-		Port:              getEnv("PORT", "8080"),
-		DatabaseURL:       mustGetEnv("DATABASE_URL"),
-		JWTSecret:         mustGetEnv("JWT_SECRET"),
-		GoogleClientID:    mustGetEnv("GOOGLE_CLIENT_ID"),
-		GoogleSecret:      mustGetEnv("GOOGLE_CLIENT_SECRET"),
-		GoogleCallbackURL: mustGetEnv("GOOGLE_CALLBACK_URL"),
-		AllowedEmails:     parseList(getEnv("ALLOWED_EMAILS", "")),
+	cfg := &Config{
+		Port:                getEnv("PORT", "8080"),
+		DatabaseURL:         mustGetEnv("DATABASE_URL"),
+		JWTSecret:           mustGetEnv("JWT_SECRET"),
+		GoogleClientID:      mustGetEnv("GOOGLE_CLIENT_ID"),
+		GoogleSecret:        mustGetEnv("GOOGLE_CLIENT_SECRET"),
+		GoogleCallbackURL:   mustGetEnv("GOOGLE_CALLBACK_URL"),
+		AllowedEmails:       parseList(getEnv("ALLOWED_EMAILS", "")),
+		AllowedRedirectURLs: parseList(getEnv("ALLOWED_REDIRECT_URLS", "")),
+		CookieSecure:        getBoolEnv("COOKIE_SECURE", true),
+		CookieDomain:        getEnv("COOKIE_DOMAIN", ""),
 	}
+
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
+
+	return cfg
+}
+
+// Validate enforces invariants that must hold for the service to be safe to run.
+func (c *Config) Validate() error {
+	if len(c.JWTSecret) < minJWTSecretLen {
+		return fmt.Errorf("JWT_SECRET must be at least %d bytes, got %d", minJWTSecretLen, len(c.JWTSecret))
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {
@@ -39,6 +65,18 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getBoolEnv(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func mustGetEnv(key string) string {

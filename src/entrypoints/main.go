@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,7 +23,12 @@ import (
 )
 
 func main() {
-	gin.SetMode(gin.ReleaseMode)
+	// Honor GIN_MODE if set; default to release for production safety.
+	if mode := os.Getenv("GIN_MODE"); mode != "" {
+		gin.SetMode(mode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	cfg := config.Load()
 
@@ -49,11 +60,38 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	tokenRepo := repository.NewTokenRepository(db)
 	authSvc := service.NewAuthService(cfg, userRepo, tokenRepo)
-	authHandler := handler.NewAuthHandler(authSvc)
-	router := handler.NewRouter(authHandler)
+	authHandler := handler.NewAuthHandler(authSvc, cfg)
+	router := handler.NewRouter(authHandler, authSvc)
 
-	log.Printf("Server starting on :%s", cfg.Port)
-	if err := router.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("failed to start server: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: router,
+		// Bound every phase of a connection so a slow or idle client cannot
+		// hold resources open (slowloris / exhaustion defense).
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
+
+	// Serve in the background so main can wait for a shutdown signal.
+	go func() {
+		log.Printf("Server starting on :%s", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("failed to start server: %v", err)
+		}
+	}()
+
+	// Block until SIGINT/SIGTERM, then drain in-flight requests.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("server forced to shutdown: %v", err)
+	}
+	log.Println("Server exited")
 }

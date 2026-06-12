@@ -7,17 +7,22 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY src/ ./src/
-RUN go build -o server ./src/entrypoints/
+# Static binary (CGO off) with symbol table and DWARF stripped for a smaller image.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o server ./src/entrypoints/
 
 # Run stage
 FROM alpine:3.21
 
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl \
+    && addgroup -S app && adduser -S -G app app
 
 WORKDIR /app
 
 COPY --from=builder /app/server .
 COPY --from=builder /app/src/migrations ./src/migrations
+
+# Drop privileges: run as a non-root user.
+USER app
 
 EXPOSE 8080
 
