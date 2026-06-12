@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/myronovy/authentication/src/internal/config"
+	"github.com/myronovy/authentication/src/internal/domain"
 	"github.com/myronovy/authentication/src/internal/service"
 )
 
@@ -16,6 +17,11 @@ const (
 	oauthStateCookie  = "oauth_state"
 	redirectURLCookie = "auth_redirect_url"
 	oauthCookieMaxAge = 300 // seconds; the OAuth round-trip is short-lived
+
+	accessTokenCookie   = "access_token"
+	refreshTokenCookie  = "refresh_token"
+	accessCookieMaxAge  = 15 * 60          // mirrors the access-token TTL
+	refreshCookieMaxAge = 7 * 24 * 60 * 60 // mirrors the refresh-token TTL
 )
 
 type AuthHandler struct {
@@ -36,6 +42,26 @@ func (h *AuthHandler) setCookie(c *gin.Context, name, value string, maxAge int, 
 
 func (h *AuthHandler) clearCookie(c *gin.Context, name string) {
 	h.setCookie(c, name, "", -1, true)
+}
+
+// setTokenCookies delivers the token pair to the browser. The refresh token is
+// httpOnly so client JS can never read it; the short-lived access token is
+// readable so SPAs can attach it as a Bearer header.
+func (h *AuthHandler) setTokenCookies(c *gin.Context, pair *domain.TokenPair) {
+	h.setCookie(c, refreshTokenCookie, pair.RefreshToken, refreshCookieMaxAge, true)
+	h.setCookie(c, accessTokenCookie, pair.AccessToken, accessCookieMaxAge, false)
+}
+
+// isAllowedRedirect reports whether url exactly matches a configured target.
+// Exact matching closes the open-redirect: an attacker cannot point the flow at
+// their own domain to harvest tokens.
+func (h *AuthHandler) isAllowedRedirect(url string) bool {
+	for _, allowed := range h.cfg.AllowedRedirectURLs {
+		if url == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *AuthHandler) GoogleLogin(c *gin.Context) {
@@ -79,29 +105,34 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 		return
 	}
 
-	if redirectURL, err := c.Cookie("auth_redirect_url"); err == nil && redirectURL != "" {
-		c.SetCookie("auth_redirect_url", "", -1, "/", "", false, true)
-		c.Redirect(http.StatusTemporaryRedirect,
-			redirectURL+"?access_token="+pair.AccessToken+"&refresh_token="+pair.RefreshToken)
+	// Tokens are delivered via cookies only — never appended to a URL where
+	// they would leak through browser history, Referer, and proxy logs.
+	h.setTokenCookies(c, pair)
+
+	if redirectURL, err := c.Cookie(redirectURLCookie); err == nil && redirectURL != "" {
+		h.clearCookie(c, redirectURLCookie)
+		if !h.isAllowedRedirect(redirectURL) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "redirect_url not allowed"})
+			return
+		}
+		// No tokens in the query string; the browser already holds the cookies.
+		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"access_token":  pair.AccessToken,
-		"refresh_token": pair.RefreshToken,
+		"access_token": pair.AccessToken,
 	})
 }
 
 func (h *AuthHandler) Refresh(c *gin.Context) {
-	var body struct {
-		RefreshToken string `json:"refresh_token" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	refreshToken := h.readRefreshToken(c)
+	if refreshToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing refresh token"})
 		return
 	}
 
-	pair, err := h.authService.RefreshTokens(c.Request.Context(), body.RefreshToken)
+	pair, err := h.authService.RefreshTokens(c.Request.Context(), refreshToken)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidToken) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired refresh token"})
@@ -111,10 +142,25 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 
+	// Rotated refresh token rides back in the httpOnly cookie; only the access
+	// token is exposed in the body.
+	h.setTokenCookies(c, pair)
 	c.JSON(http.StatusOK, gin.H{
-		"access_token":  pair.AccessToken,
-		"refresh_token": pair.RefreshToken,
+		"access_token": pair.AccessToken,
 	})
+}
+
+// readRefreshToken prefers the httpOnly cookie and falls back to a JSON body for
+// non-browser clients.
+func (h *AuthHandler) readRefreshToken(c *gin.Context) string {
+	if cookie, err := c.Cookie(refreshTokenCookie); err == nil && cookie != "" {
+		return cookie
+	}
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	return body.RefreshToken
 }
 
 func (h *AuthHandler) Validate(c *gin.Context) {

@@ -9,13 +9,14 @@ import (
 )
 
 type Config struct {
-	Port              string
-	DatabaseURL       string
-	JWTSecret         string
-	GoogleClientID    string
-	GoogleSecret      string
-	GoogleCallbackURL string
-	AllowedEmails     []string
+	Port                string
+	DatabaseURL         string
+	JWTSecret           string
+	GoogleClientID      string
+	GoogleSecret        string
+	GoogleCallbackURL   string
+	AllowedEmails       []string
+	AllowedRedirectURLs []string
 }
 
 func Load() *Config {
@@ -24,13 +25,14 @@ func Load() *Config {
 	}
 
 	return &Config{
-		Port:              getEnv("PORT", "8080"),
-		DatabaseURL:       mustGetEnv("DATABASE_URL"),
-		JWTSecret:         mustGetEnv("JWT_SECRET"),
-		GoogleClientID:    mustGetEnv("GOOGLE_CLIENT_ID"),
-		GoogleSecret:      mustGetEnv("GOOGLE_CLIENT_SECRET"),
-		GoogleCallbackURL: mustGetEnv("GOOGLE_CALLBACK_URL"),
-		AllowedEmails:     parseList(getEnv("ALLOWED_EMAILS", "")),
+		Port:                getEnv("PORT", "8080"),
+		DatabaseURL:         mustGetEnv("DATABASE_URL"),
+		JWTSecret:           mustGetEnv("JWT_SECRET"),
+		GoogleClientID:      mustGetEnv("GOOGLE_CLIENT_ID"),
+		GoogleSecret:        mustGetEnv("GOOGLE_CLIENT_SECRET"),
+		GoogleCallbackURL:   mustGetEnv("GOOGLE_CALLBACK_URL"),
+		AllowedEmails:       parseList(getEnv("ALLOWED_EMAILS", "")),
+		AllowedRedirectURLs: parseList(getEnv("ALLOWED_REDIRECT_URLS", "")),
 	}
 }
 

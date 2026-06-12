@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -88,5 +89,84 @@ func TestGoogleCallbackAcceptsMatchingState(t *testing.T) {
 
 	if w.Code == http.StatusBadRequest {
 		t.Fatalf("matching state was rejected with 400")
+	}
+}
+
+// callbackWithState drives GoogleCallback through a valid state check and the
+// given redirect_url cookie, returning the recorder.
+func callbackWithState(h *AuthHandler, redirectURL string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodGet, "/google/callback?code=abc&state=match", nil)
+	req.AddCookie(&http.Cookie{Name: oauthStateCookie, Value: "match"})
+	if redirectURL != "" {
+		req.AddCookie(&http.Cookie{Name: redirectURLCookie, Value: redirectURL})
+	}
+	c.Request = req
+	h.GoogleCallback(c)
+	return w
+}
+
+func TestGoogleCallbackRejectsNonAllowlistedRedirect(t *testing.T) {
+	cfg := &config.Config{AllowedRedirectURLs: []string{"https://app.example.com/auth"}}
+	h := newTestHandler(&mockAuthService{callbackPair: &domain.TokenPair{AccessToken: "a", RefreshToken: "r"}}, cfg)
+
+	w := callbackWithState(h, "https://evil.example.com/harvest")
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("non-allowlisted redirect: got status %d, want 400", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "" {
+		t.Fatalf("expected no redirect, got Location %q", loc)
+	}
+}
+
+func TestGoogleCallbackAllowlistedRedirectCarriesNoTokens(t *testing.T) {
+	const target = "https://app.example.com/auth"
+	cfg := &config.Config{AllowedRedirectURLs: []string{target}}
+	h := newTestHandler(&mockAuthService{callbackPair: &domain.TokenPair{AccessToken: "the-access", RefreshToken: "the-refresh"}}, cfg)
+
+	w := callbackWithState(h, target)
+
+	loc := w.Header().Get("Location")
+	if loc != target {
+		t.Fatalf("Location = %q, want exactly %q (no query)", loc, target)
+	}
+	if strings.Contains(loc, "access_token") || strings.Contains(loc, "refresh_token") ||
+		strings.Contains(loc, "the-access") || strings.Contains(loc, "the-refresh") {
+		t.Fatalf("token leaked into redirect Location: %q", loc)
+	}
+
+	// Refresh token must be delivered as an httpOnly cookie, never the body.
+	var sawRefreshCookie bool
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == refreshTokenCookie {
+			sawRefreshCookie = true
+			if !ck.HttpOnly {
+				t.Fatal("refresh_token cookie is not httpOnly")
+			}
+		}
+	}
+	if !sawRefreshCookie {
+		t.Fatal("refresh_token cookie was not set")
+	}
+}
+
+func TestRefreshReadsTokenFromCookie(t *testing.T) {
+	h := newTestHandler(&mockAuthService{callbackPair: &domain.TokenPair{AccessToken: "a2", RefreshToken: "r2"}}, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+	req.AddCookie(&http.Cookie{Name: refreshTokenCookie, Value: "r1"})
+	c.Request = req
+
+	h.Refresh(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("refresh via cookie: got status %d, want 200", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "refresh_token") {
+		t.Fatalf("refresh token leaked into response body: %s", w.Body.String())
 	}
 }
