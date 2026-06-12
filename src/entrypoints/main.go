@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -13,16 +14,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/handler"
 	repository "github.com/myronovy/authentication/src/internal/repository/postgres"
 	"github.com/myronovy/authentication/src/internal/service"
+	"github.com/myronovy/authentication/src/migrations"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 func main() {
+	migrateOnly := flag.Bool("migrate-only", false, "apply database migrations and exit")
+	flag.Parse()
+	runMigrateOnly := *migrateOnly || os.Getenv("MIGRATE_ONLY") == "true"
+
 	// Honor GIN_MODE if set; default to release for production safety.
 	if mode := os.Getenv("GIN_MODE"); mode != "" {
 		gin.SetMode(mode)
@@ -32,15 +38,25 @@ func main() {
 
 	cfg := config.Load()
 
-	// Run migrations
-	m, err := migrate.New("file://src/migrations", cfg.DatabaseURL)
+	// Run migrations from the embedded SQL (no dependency on CWD or shipped files).
+	srcDriver, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		log.Fatalf("failed to load embedded migrations: %v", err)
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", srcDriver, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("failed to init migrations: %v", err)
 	}
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 	log.Println("Migrations applied")
+
+	// Allow deployments to run migrations as a discrete step and exit cleanly.
+	if runMigrateOnly {
+		log.Println("migrate-only: migrations applied, exiting")
+		return
+	}
 
 	// Connect to database
 	db, err := gorm.Open(gormpostgres.Open(cfg.DatabaseURL), &gorm.Config{})

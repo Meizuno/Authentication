@@ -19,7 +19,6 @@ RUN apk add --no-cache curl \
 WORKDIR /app
 
 COPY --from=builder /app/server .
-COPY --from=builder /app/src/migrations ./src/migrations
 
 # Drop privileges: run as a non-root user.
 USER app
