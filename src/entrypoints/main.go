@@ -61,6 +61,12 @@ func main() {
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: router,
+		// Bound every phase of a connection so a slow or idle client cannot
+		// hold resources open (slowloris / exhaustion defense).
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// Serve in the background so main can wait for a shutdown signal.
