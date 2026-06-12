@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -22,6 +23,8 @@ type Config struct {
 	GoogleCallbackURL   string
 	AllowedEmails       []string
 	AllowedRedirectURLs []string
+	CookieSecure        bool
+	CookieDomain        string
 }
 
 func Load() *Config {
@@ -38,6 +41,8 @@ func Load() *Config {
 		GoogleCallbackURL:   mustGetEnv("GOOGLE_CALLBACK_URL"),
 		AllowedEmails:       parseList(getEnv("ALLOWED_EMAILS", "")),
 		AllowedRedirectURLs: parseList(getEnv("ALLOWED_REDIRECT_URLS", "")),
+		CookieSecure:        getBoolEnv("COOKIE_SECURE", true),
+		CookieDomain:        getEnv("COOKIE_DOMAIN", ""),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -60,6 +65,18 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getBoolEnv(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func mustGetEnv(key string) string {

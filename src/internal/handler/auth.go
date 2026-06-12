@@ -33,11 +33,11 @@ func NewAuthHandler(authService service.AuthService, cfg *config.Config) *AuthHa
 	return &AuthHandler{authService: authService, cfg: cfg}
 }
 
-// setCookie writes a hardened cookie. Secure is hardcoded here; item 6 makes it
-// configurable so non-HTTPS local dev can still receive cookies.
+// setCookie writes a hardened cookie: explicit SameSite=Lax and Secure driven by
+// config (default true; COOKIE_SECURE=false only for non-HTTPS local dev).
 func (h *AuthHandler) setCookie(c *gin.Context, name, value string, maxAge int, httpOnly bool) {
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(name, value, maxAge, "/", "", true, httpOnly)
+	c.SetCookie(name, value, maxAge, "/", h.cfg.CookieDomain, h.cfg.CookieSecure, httpOnly)
 }
 
 func (h *AuthHandler) clearCookie(c *gin.Context, name string) {

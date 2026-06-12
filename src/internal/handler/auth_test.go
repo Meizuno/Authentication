@@ -152,6 +152,37 @@ func TestGoogleCallbackAllowlistedRedirectCarriesNoTokens(t *testing.T) {
 	}
 }
 
+func TestCookiesAreSecureAndSameSite(t *testing.T) {
+	cfg := &config.Config{CookieSecure: true}
+	h := newTestHandler(&mockAuthService{}, cfg)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/google", nil)
+
+	h.GoogleLogin(c)
+
+	var found bool
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name != oauthStateCookie {
+			continue
+		}
+		found = true
+		if !ck.Secure {
+			t.Error("oauth_state cookie is not Secure")
+		}
+		if ck.SameSite != http.SameSiteLaxMode {
+			t.Errorf("oauth_state SameSite = %v, want Lax", ck.SameSite)
+		}
+		if !ck.HttpOnly {
+			t.Error("oauth_state cookie is not HttpOnly")
+		}
+	}
+	if !found {
+		t.Fatal("oauth_state cookie was not set")
+	}
+}
+
 func TestRefreshReadsTokenFromCookie(t *testing.T) {
 	h := newTestHandler(&mockAuthService{callbackPair: &domain.TokenPair{AccessToken: "a2", RefreshToken: "r2"}}, nil)
 
