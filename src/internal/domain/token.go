@@ -11,7 +11,7 @@ type RefreshToken struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
 	UserID    uuid.UUID `gorm:"type:uuid;not null;index"`
 	User      User
-	Token     string    `gorm:"uniqueIndex;not null"`
+	TokenHash string    `gorm:"column:token_hash;uniqueIndex;not null"`
 	ExpiresAt time.Time `gorm:"not null"`
 	CreatedAt time.Time
 }
@@ -23,7 +23,7 @@ type TokenPair struct {
 
 type TokenRepository interface {
 	Create(ctx context.Context, token *RefreshToken) error
-	FindByToken(ctx context.Context, token string) (*RefreshToken, error)
-	DeleteByToken(ctx context.Context, token string) error
+	FindByTokenHash(ctx context.Context, tokenHash string) (*RefreshToken, error)
+	DeleteByTokenHash(ctx context.Context, tokenHash string) error
 	DeleteByUserID(ctx context.Context, userID uuid.UUID) error
 }

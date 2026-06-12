@@ -3,21 +3,23 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
-	"encoding/json"
-	"fmt"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"io"
-	"net/http"
-	"strings"
 )
 
 const (
@@ -109,7 +111,9 @@ func (s *authService) HandleGoogleCallback(ctx context.Context, code string) (*d
 }
 
 func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*domain.TokenPair, error) {
-	stored, err := s.tokenRepo.FindByToken(ctx, refreshToken)
+	tokenHash := hashToken(refreshToken)
+
+	stored, err := s.tokenRepo.FindByTokenHash(ctx, tokenHash)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +121,7 @@ func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*
 		return nil, ErrInvalidToken
 	}
 
-	if err := s.tokenRepo.DeleteByToken(ctx, refreshToken); err != nil {
+	if err := s.tokenRepo.DeleteByTokenHash(ctx, tokenHash); err != nil {
 		return nil, err
 	}
 
@@ -181,7 +185,7 @@ func (s *authService) generateTokenPair(ctx context.Context, userID uuid.UUID) (
 	stored := &domain.RefreshToken{
 		ID:        uuid.New(),
 		UserID:    userID,
-		Token:     refreshToken,
+		TokenHash: hashToken(refreshToken),
 		ExpiresAt: time.Now().Add(refreshTokenTTL),
 	}
 	if err := s.tokenRepo.Create(ctx, stored); err != nil {
@@ -210,6 +214,14 @@ func generateRefreshToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// hashToken returns the hex-encoded SHA-256 of a raw refresh token. Only this
+// hash is ever persisted; the raw token is shown to the client once and never
+// stored, so a database leak cannot be replayed against /refresh.
+func hashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *authService) generateRefreshToken() (string, error) {
