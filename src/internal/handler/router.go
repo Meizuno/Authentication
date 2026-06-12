@@ -17,6 +17,8 @@ func NewRouter(authHandler *AuthHandler) *gin.Engine {
 	r.GET("/google", authHandler.GoogleLogin)
 	r.GET("/google/callback", authHandler.GoogleCallback)
 	r.POST("/refresh", authHandler.Refresh)
+	r.POST("/logout", authHandler.Logout)
+	r.POST("/logout-all", authHandler.LogoutAll)
 	r.GET("/validate", authHandler.Validate)
 	r.GET("/me", authHandler.Me)
 

@@ -55,6 +55,8 @@ type AuthService interface {
 	RefreshTokens(ctx context.Context, refreshToken string) (*domain.TokenPair, error)
 	ValidateAccessToken(tokenString string) (uuid.UUID, error)
 	GetMe(ctx context.Context, userID uuid.UUID) (*domain.User, error)
+	Logout(ctx context.Context, refreshToken string) error
+	LogoutAll(ctx context.Context, userID uuid.UUID) error
 }
 
 type authService struct {
@@ -172,6 +174,16 @@ func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error)
 	}
 
 	return userID, nil
+}
+
+// Logout revokes the single presented refresh token.
+func (s *authService) Logout(ctx context.Context, refreshToken string) error {
+	return s.tokenRepo.DeleteByTokenHash(ctx, hashToken(refreshToken))
+}
+
+// LogoutAll revokes every refresh token belonging to the user.
+func (s *authService) LogoutAll(ctx context.Context, userID uuid.UUID) error {
+	return s.tokenRepo.DeleteByUserID(ctx, userID)
 }
 
 func (s *authService) GetMe(ctx context.Context, userID uuid.UUID) (*domain.User, error) {

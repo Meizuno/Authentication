@@ -15,8 +15,10 @@ import (
 
 // mockAuthService is a configurable stand-in for service.AuthService.
 type mockAuthService struct {
-	callbackPair *domain.TokenPair
-	callbackErr  error
+	callbackPair    *domain.TokenPair
+	callbackErr     error
+	loggedOutToken  string
+	loggedOutUserID uuid.UUID
 }
 
 func (m *mockAuthService) GetGoogleAuthURL(state string) string {
@@ -35,6 +37,16 @@ func (m *mockAuthService) ValidateAccessToken(_ string) (uuid.UUID, error) { ret
 
 func (m *mockAuthService) GetMe(_ context.Context, _ uuid.UUID) (*domain.User, error) {
 	return nil, nil
+}
+
+func (m *mockAuthService) Logout(_ context.Context, refreshToken string) error {
+	m.loggedOutToken = refreshToken
+	return nil
+}
+
+func (m *mockAuthService) LogoutAll(_ context.Context, userID uuid.UUID) error {
+	m.loggedOutUserID = userID
+	return nil
 }
 
 func newTestHandler(svc *mockAuthService, cfg *config.Config) *AuthHandler {
@@ -180,6 +192,36 @@ func TestCookiesAreSecureAndSameSite(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("oauth_state cookie was not set")
+	}
+}
+
+func TestLogoutRevokesPresentedTokenAndClearsCookies(t *testing.T) {
+	mock := &mockAuthService{}
+	h := newTestHandler(mock, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: refreshTokenCookie, Value: "rtoken"})
+	c.Request = req
+
+	h.Logout(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout: got status %d, want 200", w.Code)
+	}
+	if mock.loggedOutToken != "rtoken" {
+		t.Fatalf("service.Logout got %q, want %q", mock.loggedOutToken, "rtoken")
+	}
+	// The refresh cookie must be cleared (MaxAge < 0).
+	var cleared bool
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == refreshTokenCookie && ck.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("refresh_token cookie was not cleared on logout")
 	}
 }
 
