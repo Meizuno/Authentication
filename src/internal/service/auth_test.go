@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -102,6 +104,54 @@ func TestRefreshTokenStoredAsHashNotPlaintext(t *testing.T) {
 	}
 	if stored.TokenHash != wantHash {
 		t.Fatalf("stored hash = %q, want %q", stored.TokenHash, wantHash)
+	}
+}
+
+func TestFetchGoogleUserInfoNon200IsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	orig := googleUserInfoURL
+	googleUserInfoURL = srv.URL
+	defer func() { googleUserInfoURL = orig }()
+
+	info, err := fetchGoogleUserInfo(context.Background(), "bad-token")
+	if err == nil {
+		t.Fatal("expected error on non-200, got nil")
+	}
+	if info != nil {
+		t.Fatalf("expected nil info on error, got %+v", info)
+	}
+}
+
+func TestFetchGoogleUserInfoSendsBearerHeaderNotQuery(t *testing.T) {
+	var gotAuth, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"email":"u@example.com","verified_email":true,"name":"U"}`))
+	}))
+	defer srv.Close()
+
+	orig := googleUserInfoURL
+	googleUserInfoURL = srv.URL
+	defer func() { googleUserInfoURL = orig }()
+
+	info, err := fetchGoogleUserInfo(context.Background(), "good-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAuth != "Bearer good-token" {
+		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer good-token")
+	}
+	if gotQuery != "" {
+		t.Fatalf("token leaked into query string: %q", gotQuery)
+	}
+	if !info.VerifiedEmail || info.Email != "u@example.com" {
+		t.Fatalf("unexpected info: %+v", info)
 	}
 }
 

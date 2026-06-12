@@ -28,16 +28,26 @@ const (
 )
 
 var (
-	ErrEmailNotAllowed = errors.New("email not allowed")
-	ErrInvalidToken    = errors.New("invalid token")
-	ErrTokenExpired    = errors.New("token expired")
+	ErrEmailNotAllowed  = errors.New("email not allowed")
+	ErrEmailNotVerified = errors.New("email not verified")
+	ErrInvalidToken     = errors.New("invalid token")
+	ErrTokenExpired     = errors.New("token expired")
 )
 
 type googleUserInfo struct {
-	Email   string `json:"email"`
-	Name    string `json:"name"`
-	Picture string `json:"picture"`
+	Email         string `json:"email"`
+	VerifiedEmail bool   `json:"verified_email"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
 }
+
+// googleUserInfoURL is a var (not a const) so tests can point it at a stub
+// server. googleHTTPClient bounds the outbound call so a hung Google response
+// can't pin a request goroutine indefinitely.
+var (
+	googleUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+	googleHTTPClient  = &http.Client{Timeout: 10 * time.Second}
+)
 
 type AuthService interface {
 	GetGoogleAuthURL(state string) string
@@ -81,9 +91,13 @@ func (s *authService) HandleGoogleCallback(ctx context.Context, code string) (*d
 		return nil, fmt.Errorf("failed to exchange code: %w", err)
 	}
 
-	info, err := fetchGoogleUserInfo(oauthToken.AccessToken)
+	info, err := fetchGoogleUserInfo(ctx, oauthToken.AccessToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user info: %w", err)
+	}
+
+	if info.Email == "" || !info.VerifiedEmail {
+		return nil, ErrEmailNotVerified
 	}
 
 	if !s.isEmailAllowed(info.Email) {
@@ -240,12 +254,24 @@ func (s *authService) isEmailAllowed(email string) bool {
 	return false
 }
 
-func fetchGoogleUserInfo(accessToken string) (*googleUserInfo, error) {
-	resp, err := http.Get("https://www.googleapis.com/oauth2/v2/userinfo?access_token=" + accessToken)
+func fetchGoogleUserInfo(ctx context.Context, accessToken string) (*googleUserInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, googleUserInfoURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Pass the token in the Authorization header, not the query string, so it
+	// does not land in access logs along the way.
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := googleHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("google userinfo returned status %d", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
