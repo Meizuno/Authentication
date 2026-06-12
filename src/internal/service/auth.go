@@ -7,14 +7,14 @@ import (
 	"errors"
 	"time"
 
+	"encoding/json"
+	"fmt"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -26,9 +26,9 @@ const (
 )
 
 var (
-	ErrEmailNotAllowed  = errors.New("email not allowed")
-	ErrInvalidToken     = errors.New("invalid token")
-	ErrTokenExpired     = errors.New("token expired")
+	ErrEmailNotAllowed = errors.New("email not allowed")
+	ErrInvalidToken    = errors.New("invalid token")
+	ErrTokenExpired    = errors.New("token expired")
 )
 
 type googleUserInfo struct {
@@ -46,10 +46,10 @@ type AuthService interface {
 }
 
 type authService struct {
-	cfg          *config.Config
-	userRepo     domain.UserRepository
-	tokenRepo    domain.TokenRepository
-	oauthConfig  *oauth2.Config
+	cfg         *config.Config
+	userRepo    domain.UserRepository
+	tokenRepo   domain.TokenRepository
+	oauthConfig *oauth2.Config
 }
 
 func NewAuthService(cfg *config.Config, userRepo domain.UserRepository, tokenRepo domain.TokenRepository) AuthService {

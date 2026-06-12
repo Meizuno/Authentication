@@ -9,13 +9,13 @@ import (
 )
 
 type Config struct {
-	Port            string
-	DatabaseURL     string
-	JWTSecret       string
-	GoogleClientID  string
-	GoogleSecret    string
+	Port              string
+	DatabaseURL       string
+	JWTSecret         string
+	GoogleClientID    string
+	GoogleSecret      string
 	GoogleCallbackURL string
-	AllowedEmails   []string
+	AllowedEmails     []string
 }
 
 func Load() *Config {
