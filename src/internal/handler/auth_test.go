@@ -52,6 +52,10 @@ func (m *mockAuthService) LogoutAll(_ context.Context, userID uuid.UUID) error {
 	return nil
 }
 
+func (m *mockAuthService) CleanupExpiredTokens(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
 func newTestHandler(svc *mockAuthService, cfg *config.Config) *AuthHandler {
 	gin.SetMode(gin.TestMode)
 	if cfg == nil {

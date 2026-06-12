@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -33,17 +34,24 @@ func (r *fakeTokenRepo) Create(_ context.Context, t *domain.RefreshToken) error 
 	return nil
 }
 
-// ConsumeByTokenHash mirrors the production atomic delete: the map mutation is
-// guarded so exactly one concurrent caller can claim a given hash.
-func (r *fakeTokenRepo) ConsumeByTokenHash(_ context.Context, hash string) (*domain.RefreshToken, error) {
+// MarkUsed mirrors the production atomic UPDATE ... WHERE used_at IS NULL: the
+// map mutation is guarded so exactly one concurrent caller can claim a live row.
+func (r *fakeTokenRepo) MarkUsed(_ context.Context, hash string) (*domain.RefreshToken, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t, ok := r.byHash[hash]
-	if !ok {
+	if !ok || t.UsedAt != nil {
 		return nil, nil
 	}
-	delete(r.byHash, hash)
+	now := time.Now()
+	t.UsedAt = &now
 	return t, nil
+}
+
+func (r *fakeTokenRepo) FindByTokenHash(_ context.Context, hash string) (*domain.RefreshToken, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.byHash[hash], nil
 }
 
 func (r *fakeTokenRepo) DeleteByTokenHash(_ context.Context, hash string) error {
@@ -62,6 +70,30 @@ func (r *fakeTokenRepo) DeleteByUserID(_ context.Context, userID uuid.UUID) erro
 		}
 	}
 	return nil
+}
+
+func (r *fakeTokenRepo) DeleteByFamilyID(_ context.Context, familyID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for h, t := range r.byHash {
+		if t.FamilyID == familyID {
+			delete(r.byHash, h)
+		}
+	}
+	return nil
+}
+
+func (r *fakeTokenRepo) DeleteExpired(_ context.Context, now time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for h, t := range r.byHash {
+		if t.ExpiresAt.Before(now) {
+			delete(r.byHash, h)
+			n++
+		}
+	}
+	return n, nil
 }
 
 type fakeUserRepo struct {
@@ -100,7 +132,7 @@ func TestRefreshTokenStoredAsHashNotPlaintext(t *testing.T) {
 	svc := newTestService(tokenRepo, newFakeUserRepo())
 	userID := uuid.New()
 
-	pair, err := svc.generateTokenPair(context.Background(), userID)
+	pair, err := svc.generateTokenPair(context.Background(), userID, uuid.New())
 	if err != nil {
 		t.Fatalf("generateTokenPair: %v", err)
 	}
@@ -208,18 +240,17 @@ func TestFetchGoogleUserInfoSendsBearerHeaderNotQuery(t *testing.T) {
 	}
 }
 
-func TestRefreshLookupByRawTokenSucceeds(t *testing.T) {
+func TestRefreshHappyPathRotatesWithinFamily(t *testing.T) {
 	tokenRepo := newFakeTokenRepo()
 	svc := newTestService(tokenRepo, newFakeUserRepo())
 	userID := uuid.New()
+	familyID := uuid.New()
 
-	pair, err := svc.generateTokenPair(context.Background(), userID)
+	pair, err := svc.generateTokenPair(context.Background(), userID, familyID)
 	if err != nil {
 		t.Fatalf("generateTokenPair: %v", err)
 	}
 
-	// Presenting the raw token must resolve (the service hashes it on lookup),
-	// and rotation must invalidate the old hash.
 	newPair, err := svc.RefreshTokens(context.Background(), pair.RefreshToken)
 	if err != nil {
 		t.Fatalf("RefreshTokens with raw token failed: %v", err)
@@ -227,8 +258,53 @@ func TestRefreshLookupByRawTokenSucceeds(t *testing.T) {
 	if newPair.RefreshToken == pair.RefreshToken {
 		t.Fatal("rotation returned the same refresh token")
 	}
-	if _, ok := tokenRepo.byHash[hashToken(pair.RefreshToken)]; ok {
-		t.Fatal("old token hash still present after rotation")
+
+	// The old token is retained but marked used (kept for reuse detection); the
+	// new token stays in the same family.
+	old := tokenRepo.byHash[hashToken(pair.RefreshToken)]
+	if old == nil || old.UsedAt == nil {
+		t.Fatal("old token should be retained and marked used")
+	}
+	fresh := tokenRepo.byHash[hashToken(newPair.RefreshToken)]
+	if fresh == nil || fresh.FamilyID != familyID {
+		t.Fatalf("new token should belong to the same family %s", familyID)
+	}
+}
+
+func TestRefreshReuseRevokesFamilyAndRejects(t *testing.T) {
+	tokenRepo := newFakeTokenRepo()
+	svc := newTestService(tokenRepo, newFakeUserRepo())
+	familyID := uuid.New()
+
+	first, err := svc.generateTokenPair(context.Background(), uuid.New(), familyID)
+	if err != nil {
+		t.Fatalf("generateTokenPair: %v", err)
+	}
+
+	// Legitimate rotation consumes `first` and issues `second` in the family.
+	second, err := svc.RefreshTokens(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("first rotation: %v", err)
+	}
+
+	// Replaying the already-used `first` token is a reuse event: reject AND
+	// revoke the whole family, so `second` is killed too.
+	if _, err := svc.RefreshTokens(context.Background(), first.RefreshToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("replay of used token: got %v, want ErrInvalidToken", err)
+	}
+	if len(tokenRepo.byHash) != 0 {
+		t.Fatalf("family should be fully revoked, %d tokens remain", len(tokenRepo.byHash))
+	}
+	// The previously-valid `second` token must now be rejected too.
+	if _, err := svc.RefreshTokens(context.Background(), second.RefreshToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("second token after family revoke: got %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestRefreshUnknownTokenRejected(t *testing.T) {
+	svc := newTestService(newFakeTokenRepo(), newFakeUserRepo())
+	if _, err := svc.RefreshTokens(context.Background(), "never-issued"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("unknown token: got %v, want ErrInvalidToken", err)
 	}
 }
 
@@ -236,7 +312,7 @@ func TestConcurrentRefreshAllowsOnlyOneWinner(t *testing.T) {
 	tokenRepo := newFakeTokenRepo()
 	svc := newTestService(tokenRepo, newFakeUserRepo())
 
-	pair, err := svc.generateTokenPair(context.Background(), uuid.New())
+	pair, err := svc.generateTokenPair(context.Background(), uuid.New(), uuid.New())
 	if err != nil {
 		t.Fatalf("generateTokenPair: %v", err)
 	}

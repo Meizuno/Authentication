@@ -79,6 +79,26 @@ func main() {
 	authHandler := handler.NewAuthHandler(authSvc, cfg)
 	router := handler.NewRouter(authHandler, authSvc)
 
+	// Periodically prune expired refresh tokens so the table stays bounded.
+	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
+	defer stopCleanup()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-ticker.C:
+				if n, err := authSvc.CleanupExpiredTokens(cleanupCtx); err != nil {
+					log.Printf("token cleanup failed: %v", err)
+				} else if n > 0 {
+					log.Printf("token cleanup removed %d expired tokens", n)
+				}
+			}
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: router,

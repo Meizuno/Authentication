@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ type AuthService interface {
 	GetMe(ctx context.Context, userID uuid.UUID) (*domain.User, error)
 	Logout(ctx context.Context, refreshToken string) error
 	LogoutAll(ctx context.Context, userID uuid.UUID) error
+	CleanupExpiredTokens(ctx context.Context) (int64, error)
 }
 
 type authService struct {
@@ -123,21 +125,51 @@ func (s *authService) HandleGoogleCallback(ctx context.Context, code string) (*d
 		}
 	}
 
-	return s.generateTokenPair(ctx, user.ID)
+	// A fresh login starts a new token family.
+	return s.generateTokenPair(ctx, user.ID, uuid.New())
 }
 
 func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*domain.TokenPair, error) {
-	// Atomically claim the token: find+delete in one step so two concurrent
-	// refreshes with the same token cannot both proceed.
-	stored, err := s.tokenRepo.ConsumeByTokenHash(ctx, hashToken(refreshToken))
+	tokenHash := hashToken(refreshToken)
+
+	// Atomically claim the live token (mark-used). Exactly one concurrent
+	// refresh can win, so a token can never be rotated twice.
+	used, err := s.tokenRepo.MarkUsed(ctx, tokenHash)
 	if err != nil {
 		return nil, err
 	}
-	if stored == nil || time.Now().After(stored.ExpiresAt) {
+	if used != nil {
+		if time.Now().After(used.ExpiresAt) {
+			return nil, ErrInvalidToken
+		}
+		// Rotation stays within the same family.
+		return s.generateTokenPair(ctx, used.UserID, used.FamilyID)
+	}
+
+	// No live row claimed. If the token nonetheless exists, it was already
+	// rotated — a replay of a stolen or superseded token. Revoke the whole
+	// family (session) and reject.
+	existing, err := s.tokenRepo.FindByTokenHash(ctx, tokenHash)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		if delErr := s.tokenRepo.DeleteByFamilyID(ctx, existing.FamilyID); delErr != nil {
+			return nil, delErr
+		}
+		// Audit without secrets — never log the token or its hash.
+		log.Printf("audit: refresh token reuse detected, family revoked user_id=%s family_id=%s",
+			existing.UserID, existing.FamilyID)
 		return nil, ErrInvalidToken
 	}
 
-	return s.generateTokenPair(ctx, stored.UserID)
+	return nil, ErrInvalidToken
+}
+
+// CleanupExpiredTokens deletes refresh tokens past their expiry. Safe to call
+// periodically; returns the number removed.
+func (s *authService) CleanupExpiredTokens(ctx context.Context) (int64, error) {
+	return s.tokenRepo.DeleteExpired(ctx, time.Now())
 }
 
 func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error) {
@@ -193,7 +225,10 @@ func (s *authService) GetMe(ctx context.Context, userID uuid.UUID) (*domain.User
 	return user, nil
 }
 
-func (s *authService) generateTokenPair(ctx context.Context, userID uuid.UUID) (*domain.TokenPair, error) {
+// generateTokenPair issues an access token plus a refresh token recorded in the
+// given family. A fresh login passes a new family id; a rotation reuses the
+// rotated token's family.
+func (s *authService) generateTokenPair(ctx context.Context, userID, familyID uuid.UUID) (*domain.TokenPair, error) {
 	accessToken, err := s.generateAccessToken(userID)
 	if err != nil {
 		return nil, err
@@ -208,6 +243,7 @@ func (s *authService) generateTokenPair(ctx context.Context, userID uuid.UUID) (
 		ID:        uuid.New(),
 		UserID:    userID,
 		TokenHash: hashToken(refreshToken),
+		FamilyID:  familyID,
 		ExpiresAt: time.Now().Add(refreshTokenTTL),
 	}
 	if err := s.tokenRepo.Create(ctx, stored); err != nil {
