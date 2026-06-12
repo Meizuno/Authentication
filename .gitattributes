@@ -1,0 +1,12 @@
+# Normalize line endings: LF in the repo and working tree on every platform.
+# Keeps gofmt happy on Windows (autocrlf would otherwise inject CRLF on checkout).
+* text=auto eol=lf
+
+# Explicitly mark the source/config types this repo uses.
+*.go    text eol=lf
+*.sql   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.mod   text eol=lf
+*.sum   text eol=lf
+*.md    text eol=lf
