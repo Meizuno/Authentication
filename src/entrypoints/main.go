@@ -77,7 +77,7 @@ func main() {
 	tokenRepo := repository.NewTokenRepository(db)
 	authSvc := service.NewAuthService(cfg, userRepo, tokenRepo)
 	authHandler := handler.NewAuthHandler(authSvc, cfg)
-	router := handler.NewRouter(authHandler, authSvc)
+	router := handler.NewRouter(authHandler, authSvc, cfg)
 
 	// Periodically prune expired refresh tokens so the table stays bounded.
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())

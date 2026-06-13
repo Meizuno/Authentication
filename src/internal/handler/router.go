@@ -4,10 +4,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/service"
 )
 
-func NewRouter(authHandler *AuthHandler, authService service.AuthService) *gin.Engine {
+func NewRouter(authHandler *AuthHandler, authService service.AuthService, cfg *config.Config) *gin.Engine {
 	r := gin.Default()
 	r.SetTrustedProxies(nil)
 
@@ -15,9 +16,11 @@ func NewRouter(authHandler *AuthHandler, authService service.AuthService) *gin.E
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	r.GET("/google", authHandler.GoogleLogin)
-	r.GET("/google/callback", authHandler.GoogleCallback)
-	r.POST("/refresh", authHandler.Refresh)
+	// Per-client rate limiting on the unauthenticated endpoints.
+	limit := NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst).Middleware()
+	r.GET("/google", limit, authHandler.GoogleLogin)
+	r.GET("/google/callback", limit, authHandler.GoogleCallback)
+	r.POST("/refresh", limit, authHandler.Refresh)
 	r.POST("/logout", authHandler.Logout)
 
 	// Routes that require a valid access token.
