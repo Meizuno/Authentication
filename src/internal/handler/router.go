@@ -13,7 +13,9 @@ func NewRouter(authHandler *AuthHandler, authService service.AuthService, cfg *c
 	// of gin's text logger.
 	r := gin.New()
 	r.Use(gin.Recovery(), RequestLogger(), ClientIPContext())
-	r.SetTrustedProxies(nil)
+	// nil clears the trusted-proxy list (we sit behind Cloudflare and read
+	// CF-Connecting-IP); this never errors for a nil argument.
+	_ = r.SetTrustedProxies(nil)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})

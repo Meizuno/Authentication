@@ -246,6 +246,24 @@ func TestLogoutRevokesPresentedTokenAndClearsCookies(t *testing.T) {
 	}
 }
 
+func TestRefreshRejectsInvalidTokenWith401(t *testing.T) {
+	// The service returns ErrInvalidToken for an unknown token and for a
+	// reuse-detected (family-revoked) token; the handler surfaces both as 401.
+	h := newTestHandler(&mockAuthService{callbackErr: service.ErrInvalidToken}, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+	req.AddCookie(&http.Cookie{Name: refreshTokenCookie, Value: "replayed"})
+	c.Request = req
+
+	h.Refresh(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid/reused token: got status %d, want 401", w.Code)
+	}
+}
+
 func TestRefreshReadsTokenFromCookie(t *testing.T) {
 	h := newTestHandler(&mockAuthService{callbackPair: &domain.TokenPair{AccessToken: "a2", RefreshToken: "r2"}}, nil)
 

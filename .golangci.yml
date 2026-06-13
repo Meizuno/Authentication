@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - gosec
+  exclusions:
+    rules:
+      # Body.Close on a deferred read is a well-known false positive for errcheck.
+      - linters: [errcheck]
+        source: "\\.Body\\.Close\\(\\)"
+      # Tests may ignore errors and use weaker patterns for brevity.
+      - linters: [errcheck, gosec]
+        path: _test\.go
+
+formatters:
+  enable:
+    - gofmt
