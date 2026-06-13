@@ -2,6 +2,10 @@ package handler
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +16,7 @@ import (
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"github.com/myronovy/authentication/src/internal/service"
+	"github.com/myronovy/authentication/src/internal/signing"
 )
 
 // mockAuthService is a configurable stand-in for service.AuthService.
@@ -61,7 +66,39 @@ func newTestHandler(svc *mockAuthService, cfg *config.Config) *AuthHandler {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	return NewAuthHandler(svc, cfg)
+	// HS256 signer with no asymmetric key (JWKS empty) is enough for handler tests.
+	signer, err := signing.NewSigner(signing.AlgHS256, "", []byte("test-secret-that-is-at-least-32-bytes-long"))
+	if err != nil {
+		panic(err)
+	}
+	return NewAuthHandler(svc, cfg, signer)
+}
+
+func TestJWKSEndpointPublishesPublicKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(priv)
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	signer, err := signing.NewSigner(signing.AlgEdDSA, pemStr, nil)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	h := NewAuthHandler(&mockAuthService{}, &config.Config{}, signer)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	h.JWKS(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("JWKS: got status %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"keys"`, `"kty":"OKP"`, `"crv":"Ed25519"`, `"use":"sig"`, `"kid"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("JWKS body missing %s: %s", want, body)
+		}
+	}
 }
 
 func TestGoogleCallbackRejectsMissingState(t *testing.T) {

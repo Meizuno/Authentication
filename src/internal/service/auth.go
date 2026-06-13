@@ -20,6 +20,7 @@ import (
 	"github.com/myronovy/authentication/src/internal/audit"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
+	"github.com/myronovy/authentication/src/internal/signing"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -67,9 +68,10 @@ type authService struct {
 	userRepo    domain.UserRepository
 	tokenRepo   domain.TokenRepository
 	oauthConfig *oauth2.Config
+	signer      *signing.Signer
 }
 
-func NewAuthService(cfg *config.Config, userRepo domain.UserRepository, tokenRepo domain.TokenRepository) AuthService {
+func NewAuthService(cfg *config.Config, userRepo domain.UserRepository, tokenRepo domain.TokenRepository, signer *signing.Signer) AuthService {
 	oauthConfig := &oauth2.Config{
 		ClientID:     cfg.GoogleClientID,
 		ClientSecret: cfg.GoogleSecret,
@@ -83,6 +85,7 @@ func NewAuthService(cfg *config.Config, userRepo domain.UserRepository, tokenRep
 		userRepo:    userRepo,
 		tokenRepo:   tokenRepo,
 		oauthConfig: oauthConfig,
+		signer:      signer,
 	}
 }
 
@@ -188,12 +191,15 @@ func (s *authService) CleanupExpiredTokens(ctx context.Context) (int64, error) {
 }
 
 func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error) {
-	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-		return []byte(s.cfg.JWTSecret), nil
-	}, jwt.WithExpirationRequired())
+	// Per-method key selection lives in the signer (HMAC -> secret, asymmetric ->
+	// public key) so there is no algorithm confusion. Issuer is enforced by the
+	// parser; expiry is mandatory.
+	opts := []jwt.ParserOption{jwt.WithExpirationRequired()}
+	if s.cfg.JWTIssuer != "" {
+		opts = append(opts, jwt.WithIssuer(s.cfg.JWTIssuer))
+	}
+
+	token, err := s.signer.Verify(tokenString, opts...)
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return uuid.Nil, ErrTokenExpired
@@ -203,6 +209,13 @@ func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error)
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
+		return uuid.Nil, ErrInvalidToken
+	}
+
+	// Audience: require the token to target at least one configured audience.
+	// (golang-jwt's WithAudience only checks a single value, so "any-of" is
+	// validated explicitly here.)
+	if len(s.cfg.JWTAudience) > 0 && !audienceMatches(claims, s.cfg.JWTAudience) {
 		return uuid.Nil, ErrInvalidToken
 	}
 
@@ -217,6 +230,23 @@ func (s *authService) ValidateAccessToken(tokenString string) (uuid.UUID, error)
 	}
 
 	return userID, nil
+}
+
+// audienceMatches reports whether the token's aud claim intersects the
+// configured audiences.
+func audienceMatches(claims jwt.MapClaims, allowed []string) bool {
+	aud, err := claims.GetAudience()
+	if err != nil {
+		return false
+	}
+	for _, a := range aud {
+		for _, want := range allowed {
+			if a == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Logout revokes the single presented refresh token.
@@ -272,13 +302,22 @@ func (s *authService) generateTokenPair(ctx context.Context, userID, familyID uu
 }
 
 func (s *authService) generateAccessToken(userID uuid.UUID) (string, error) {
+	now := time.Now()
 	claims := jwt.MapClaims{
 		"sub": userID.String(),
-		"exp": time.Now().Add(accessTokenTTL).Unix(),
-		"iat": time.Now().Unix(),
+		"exp": now.Add(accessTokenTTL).Unix(),
+		"iat": now.Unix(),
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.cfg.JWTSecret))
+	// iss/aud are added only when configured, so default HS256 tokens keep their
+	// original shape until the operator opts in.
+	if s.cfg.JWTIssuer != "" {
+		claims["iss"] = s.cfg.JWTIssuer
+	}
+	if len(s.cfg.JWTAudience) > 0 {
+		claims["aud"] = s.cfg.JWTAudience
+	}
+	// The signer picks the active algorithm and attaches kid for asymmetric keys.
+	return s.signer.Sign(claims)
 }
 
 func generateRefreshToken() (string, error) {

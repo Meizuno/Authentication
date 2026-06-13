@@ -21,6 +21,9 @@ func NewRouter(authHandler *AuthHandler, authService service.AuthService, cfg *c
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// Public key set for local token verification by consumers.
+	r.GET("/.well-known/jwks.json", authHandler.JWKS)
+
 	// Per-client rate limiting on the unauthenticated endpoints.
 	limit := NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst).Middleware()
 	r.GET("/google", limit, authHandler.GoogleLogin)
