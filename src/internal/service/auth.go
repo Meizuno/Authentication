@@ -10,13 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/myronovy/authentication/src/internal/audit"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"golang.org/x/oauth2"
@@ -101,10 +102,12 @@ func (s *authService) HandleGoogleCallback(ctx context.Context, code string) (*d
 	}
 
 	if info.Email == "" || !info.VerifiedEmail {
+		audit.Event(ctx, "login", "denied_email_not_verified", slog.String("email", info.Email))
 		return nil, ErrEmailNotVerified
 	}
 
 	if !s.isEmailAllowed(info.Email) {
+		audit.Event(ctx, "login", "denied_email_not_allowed", slog.String("email", info.Email))
 		return nil, ErrEmailNotAllowed
 	}
 
@@ -126,7 +129,13 @@ func (s *authService) HandleGoogleCallback(ctx context.Context, code string) (*d
 	}
 
 	// A fresh login starts a new token family.
-	return s.generateTokenPair(ctx, user.ID, uuid.New())
+	pair, err := s.generateTokenPair(ctx, user.ID, uuid.New())
+	if err != nil {
+		return nil, err
+	}
+	audit.Event(ctx, "login", "success",
+		slog.String("user_id", user.ID.String()), slog.String("email", user.Email))
+	return pair, nil
 }
 
 func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*domain.TokenPair, error) {
@@ -143,7 +152,12 @@ func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*
 			return nil, ErrInvalidToken
 		}
 		// Rotation stays within the same family.
-		return s.generateTokenPair(ctx, used.UserID, used.FamilyID)
+		pair, err := s.generateTokenPair(ctx, used.UserID, used.FamilyID)
+		if err != nil {
+			return nil, err
+		}
+		audit.Event(ctx, "token_refresh", "success", slog.String("user_id", used.UserID.String()))
+		return pair, nil
 	}
 
 	// No live row claimed. If the token nonetheless exists, it was already
@@ -158,8 +172,9 @@ func (s *authService) RefreshTokens(ctx context.Context, refreshToken string) (*
 			return nil, delErr
 		}
 		// Audit without secrets — never log the token or its hash.
-		log.Printf("audit: refresh token reuse detected, family revoked user_id=%s family_id=%s",
-			existing.UserID, existing.FamilyID)
+		audit.Event(ctx, "token_refresh", "reuse_detected",
+			slog.String("user_id", existing.UserID.String()),
+			slog.String("family_id", existing.FamilyID.String()))
 		return nil, ErrInvalidToken
 	}
 

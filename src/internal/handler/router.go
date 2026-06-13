@@ -9,7 +9,10 @@ import (
 )
 
 func NewRouter(authHandler *AuthHandler, authService service.AuthService, cfg *config.Config) *gin.Engine {
-	r := gin.Default()
+	// gin.New (not Default) so we use the structured slog request logger instead
+	// of gin's text logger.
+	r := gin.New()
+	r.Use(gin.Recovery(), RequestLogger(), ClientIPContext())
 	r.SetTrustedProxies(nil)
 
 	r.GET("/health", func(c *gin.Context) {

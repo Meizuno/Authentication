@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 )
 
 func main() {
+	setupLogger()
+
 	migrateOnly := flag.Bool("migrate-only", false, "apply database migrations and exit")
 	flag.Parse()
 	runMigrateOnly := *migrateOnly || os.Getenv("MIGRATE_ONLY") == "true"
@@ -41,36 +44,36 @@ func main() {
 	// Run migrations from the embedded SQL (no dependency on CWD or shipped files).
 	srcDriver, err := iofs.New(migrations.FS, ".")
 	if err != nil {
-		log.Fatalf("failed to load embedded migrations: %v", err)
+		fatal("failed to load embedded migrations", err)
 	}
 	m, err := migrate.NewWithSourceInstance("iofs", srcDriver, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("failed to init migrations: %v", err)
+		fatal("failed to init migrations", err)
 	}
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		log.Fatalf("failed to run migrations: %v", err)
+		fatal("failed to run migrations", err)
 	}
-	log.Println("Migrations applied")
+	slog.Info("migrations applied")
 
 	// Allow deployments to run migrations as a discrete step and exit cleanly.
 	if runMigrateOnly {
-		log.Println("migrate-only: migrations applied, exiting")
+		slog.Info("migrate-only: migrations applied, exiting")
 		return
 	}
 
 	// Connect to database
 	db, err := gorm.Open(gormpostgres.Open(cfg.DatabaseURL), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		fatal("failed to connect to database", err)
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("failed to get sql.DB: %v", err)
+		fatal("failed to get sql.DB", err)
 	}
 	sqlDB.SetMaxOpenConns(10)
 	sqlDB.SetMaxIdleConns(3)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-	log.Println("Database connected")
+	slog.Info("database connected")
 
 	// Wire up layers
 	userRepo := repository.NewUserRepository(db)
@@ -91,9 +94,9 @@ func main() {
 				return
 			case <-ticker.C:
 				if n, err := authSvc.CleanupExpiredTokens(cleanupCtx); err != nil {
-					log.Printf("token cleanup failed: %v", err)
+					slog.Error("token cleanup failed", slog.Any("error", err))
 				} else if n > 0 {
-					log.Printf("token cleanup removed %d expired tokens", n)
+					slog.Info("token cleanup", slog.Int64("removed", n))
 				}
 			}
 		}
@@ -112,9 +115,9 @@ func main() {
 
 	// Serve in the background so main can wait for a shutdown signal.
 	go func() {
-		log.Printf("Server starting on :%s", cfg.Port)
+		slog.Info("server starting", slog.String("port", cfg.Port))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("failed to start server: %v", err)
+			fatal("failed to start server", err)
 		}
 	}()
 
@@ -122,12 +125,32 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down server...")
+	slog.Info("shutting down server")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("server forced to shutdown: %v", err)
+		fatal("server forced to shutdown", err)
 	}
-	log.Println("Server exited")
+	slog.Info("server exited")
+}
+
+// setupLogger installs a JSON slog handler as the default, with level from
+// LOG_LEVEL (debug|info|warn|error; default info).
+func setupLogger() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+}
+
+func fatal(msg string, err error) {
+	slog.Error(msg, slog.Any("error", err))
+	os.Exit(1)
 }

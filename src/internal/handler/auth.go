@@ -5,9 +5,11 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/myronovy/authentication/src/internal/audit"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"github.com/myronovy/authentication/src/internal/service"
@@ -173,6 +175,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	}
 	h.clearCookie(c, refreshTokenCookie)
 	h.clearCookie(c, accessTokenCookie)
+	audit.Event(c.Request.Context(), "logout", "success")
 	c.JSON(http.StatusOK, gin.H{"status": "logged out"})
 }
 
@@ -186,6 +189,7 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	}
 	h.clearCookie(c, refreshTokenCookie)
 	h.clearCookie(c, accessTokenCookie)
+	audit.Event(c.Request.Context(), "logout_all", "success", slog.String("user_id", userID.String()))
 	c.JSON(http.StatusOK, gin.H{"status": "logged out everywhere"})
 }
 
