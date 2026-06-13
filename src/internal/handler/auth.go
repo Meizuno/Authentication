@@ -13,6 +13,7 @@ import (
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
 	"github.com/myronovy/authentication/src/internal/service"
+	"github.com/myronovy/authentication/src/internal/signing"
 )
 
 const (
@@ -29,10 +30,17 @@ const (
 type AuthHandler struct {
 	authService service.AuthService
 	cfg         *config.Config
+	signer      *signing.Signer
 }
 
-func NewAuthHandler(authService service.AuthService, cfg *config.Config) *AuthHandler {
-	return &AuthHandler{authService: authService, cfg: cfg}
+func NewAuthHandler(authService service.AuthService, cfg *config.Config, signer *signing.Signer) *AuthHandler {
+	return &AuthHandler{authService: authService, cfg: cfg, signer: signer}
+}
+
+// JWKS publishes the current public verification key(s) as a JWK Set. Public and
+// unauthenticated; consumers fetch and cache it to verify access tokens locally.
+func (h *AuthHandler) JWKS(c *gin.Context) {
+	c.JSON(http.StatusOK, h.signer.JWKS())
 }
 
 // setCookie writes a hardened cookie: explicit SameSite=Lax and Secure driven by

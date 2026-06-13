@@ -2,6 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/domain"
+	"github.com/myronovy/authentication/src/internal/signing"
 )
 
 // fakeTokenRepo is an in-memory TokenRepository keyed by token hash. It lets the
@@ -124,7 +129,11 @@ func (r *fakeUserRepo) Create(_ context.Context, u *domain.User) error {
 
 func newTestService(tokenRepo domain.TokenRepository, userRepo domain.UserRepository) *authService {
 	cfg := &config.Config{JWTSecret: "test-secret-that-is-at-least-32-bytes-long"}
-	return &authService{cfg: cfg, userRepo: userRepo, tokenRepo: tokenRepo}
+	signer, err := signing.NewSigner(signing.AlgHS256, "", []byte(cfg.JWTSecret))
+	if err != nil {
+		panic(err)
+	}
+	return &authService{cfg: cfg, userRepo: userRepo, tokenRepo: tokenRepo, signer: signer}
 }
 
 func TestRefreshTokenStoredAsHashNotPlaintext(t *testing.T) {
@@ -156,6 +165,78 @@ func TestRefreshTokenStoredAsHashNotPlaintext(t *testing.T) {
 	}
 	if stored.TokenHash != wantHash {
 		t.Fatalf("stored hash = %q, want %q", stored.TokenHash, wantHash)
+	}
+}
+
+// edTestSigner builds an EdDSA signer for service-level asymmetric tests.
+func edTestSigner(t *testing.T) *signing.Signer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	s, err := signing.NewSigner(signing.AlgEdDSA, pemStr, nil)
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	return s
+}
+
+func TestValidateAsymmetricWithIssuerAndAudience(t *testing.T) {
+	signer := edTestSigner(t)
+	cfg := &config.Config{
+		JWTSigningAlg: signing.AlgEdDSA,
+		JWTIssuer:     "auth-service",
+		JWTAudience:   []string{"notes", "ai-chat"},
+	}
+	svc := &authService{cfg: cfg, signer: signer}
+	userID := uuid.New()
+
+	tok, err := svc.generateAccessToken(userID)
+	if err != nil {
+		t.Fatalf("generateAccessToken: %v", err)
+	}
+
+	got, err := svc.ValidateAccessToken(tok)
+	if err != nil {
+		t.Fatalf("ValidateAccessToken: %v", err)
+	}
+	if got != userID {
+		t.Fatalf("user id = %s, want %s", got, userID)
+	}
+}
+
+func TestValidateRejectsWrongIssuer(t *testing.T) {
+	signer := edTestSigner(t)
+	issuerCfg := &config.Config{JWTSigningAlg: signing.AlgEdDSA, JWTIssuer: "auth-service", JWTAudience: []string{"notes"}}
+	signSvc := &authService{cfg: issuerCfg, signer: signer}
+	tok, _ := signSvc.generateAccessToken(uuid.New())
+
+	// Same key, but the validator expects a different issuer.
+	verifyCfg := &config.Config{JWTSigningAlg: signing.AlgEdDSA, JWTIssuer: "someone-else", JWTAudience: []string{"notes"}}
+	verifySvc := &authService{cfg: verifyCfg, signer: signer}
+
+	if _, err := verifySvc.ValidateAccessToken(tok); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("wrong issuer: got %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestValidateRejectsWrongAudience(t *testing.T) {
+	signer := edTestSigner(t)
+	signCfg := &config.Config{JWTSigningAlg: signing.AlgEdDSA, JWTIssuer: "auth-service", JWTAudience: []string{"notes"}}
+	signSvc := &authService{cfg: signCfg, signer: signer}
+	tok, _ := signSvc.generateAccessToken(uuid.New())
+
+	verifyCfg := &config.Config{JWTSigningAlg: signing.AlgEdDSA, JWTIssuer: "auth-service", JWTAudience: []string{"ai-chat"}}
+	verifySvc := &authService{cfg: verifyCfg, signer: signer}
+
+	if _, err := verifySvc.ValidateAccessToken(tok); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("wrong audience: got %v, want ErrInvalidToken", err)
 	}
 }
 

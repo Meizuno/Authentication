@@ -20,6 +20,7 @@ import (
 	"github.com/myronovy/authentication/src/internal/handler"
 	repository "github.com/myronovy/authentication/src/internal/repository/postgres"
 	"github.com/myronovy/authentication/src/internal/service"
+	"github.com/myronovy/authentication/src/internal/signing"
 	"github.com/myronovy/authentication/src/migrations"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -75,11 +76,17 @@ func main() {
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 	slog.Info("database connected")
 
+	// Build the token signer (validates keys at boot).
+	signer, err := signing.NewSigner(cfg.JWTSigningAlg, cfg.JWTPrivateKey, []byte(cfg.JWTSecret))
+	if err != nil {
+		fatal("failed to init token signer", err)
+	}
+
 	// Wire up layers
 	userRepo := repository.NewUserRepository(db)
 	tokenRepo := repository.NewTokenRepository(db)
-	authSvc := service.NewAuthService(cfg, userRepo, tokenRepo)
-	authHandler := handler.NewAuthHandler(authSvc, cfg)
+	authSvc := service.NewAuthService(cfg, userRepo, tokenRepo, signer)
+	authHandler := handler.NewAuthHandler(authSvc, cfg, signer)
 	router := handler.NewRouter(authHandler, authSvc, cfg)
 
 	// Periodically prune expired refresh tokens so the table stays bounded.
