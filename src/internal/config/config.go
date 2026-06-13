@@ -25,6 +25,8 @@ type Config struct {
 	AllowedRedirectURLs []string
 	CookieSecure        bool
 	CookieDomain        string
+	RateLimitRPS        float64
+	RateLimitBurst      int
 }
 
 func Load() *Config {
@@ -43,6 +45,8 @@ func Load() *Config {
 		AllowedRedirectURLs: parseList(getEnv("ALLOWED_REDIRECT_URLS", "")),
 		CookieSecure:        getBoolEnv("COOKIE_SECURE", true),
 		CookieDomain:        getEnv("COOKIE_DOMAIN", ""),
+		RateLimitRPS:        getFloatEnv("RATE_LIMIT_RPS", 5),
+		RateLimitBurst:      getIntEnv("RATE_LIMIT_BURST", 10),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -73,6 +77,30 @@ func getBoolEnv(key string, fallback bool) bool {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getIntEnv(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getFloatEnv(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(v, 64)
 	if err != nil {
 		return fallback
 	}

@@ -4,20 +4,28 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/myronovy/authentication/src/internal/config"
 	"github.com/myronovy/authentication/src/internal/service"
 )
 
-func NewRouter(authHandler *AuthHandler, authService service.AuthService) *gin.Engine {
-	r := gin.Default()
-	r.SetTrustedProxies(nil)
+func NewRouter(authHandler *AuthHandler, authService service.AuthService, cfg *config.Config) *gin.Engine {
+	// gin.New (not Default) so we use the structured slog request logger instead
+	// of gin's text logger.
+	r := gin.New()
+	r.Use(gin.Recovery(), RequestLogger(), ClientIPContext())
+	// nil clears the trusted-proxy list (we sit behind Cloudflare and read
+	// CF-Connecting-IP); this never errors for a nil argument.
+	_ = r.SetTrustedProxies(nil)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	r.GET("/google", authHandler.GoogleLogin)
-	r.GET("/google/callback", authHandler.GoogleCallback)
-	r.POST("/refresh", authHandler.Refresh)
+	// Per-client rate limiting on the unauthenticated endpoints.
+	limit := NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst).Middleware()
+	r.GET("/google", limit, authHandler.GoogleLogin)
+	r.GET("/google/callback", limit, authHandler.GoogleCallback)
+	r.POST("/refresh", limit, authHandler.Refresh)
 	r.POST("/logout", authHandler.Logout)
 
 	// Routes that require a valid access token.

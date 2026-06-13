@@ -52,6 +52,10 @@ func (m *mockAuthService) LogoutAll(_ context.Context, userID uuid.UUID) error {
 	return nil
 }
 
+func (m *mockAuthService) CleanupExpiredTokens(_ context.Context) (int64, error) {
+	return 0, nil
+}
+
 func newTestHandler(svc *mockAuthService, cfg *config.Config) *AuthHandler {
 	gin.SetMode(gin.TestMode)
 	if cfg == nil {
@@ -239,6 +243,24 @@ func TestLogoutRevokesPresentedTokenAndClearsCookies(t *testing.T) {
 	}
 	if !cleared {
 		t.Fatal("refresh_token cookie was not cleared on logout")
+	}
+}
+
+func TestRefreshRejectsInvalidTokenWith401(t *testing.T) {
+	// The service returns ErrInvalidToken for an unknown token and for a
+	// reuse-detected (family-revoked) token; the handler surfaces both as 401.
+	h := newTestHandler(&mockAuthService{callbackErr: service.ErrInvalidToken}, nil)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+	req.AddCookie(&http.Cookie{Name: refreshTokenCookie, Value: "replayed"})
+	c.Request = req
+
+	h.Refresh(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid/reused token: got status %d, want 401", w.Code)
 	}
 }
 
